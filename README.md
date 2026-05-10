@@ -31,31 +31,36 @@
 
 ## One-command build (no Xcode)
 
+Before building, place your Canva-designed logo as `logo.icns` in the repository root (already included in this repo).
+
 ```bash
 npm install
-npm install batch-cluster sharp
 npm run build:mac
 ```
 
-> The `npm install` step triggers a `postinstall` hook that runs
-> `electron-rebuild -f`, which compiles native modules (notably
-> [`sharp`](https://sharp.pixelplumbing.com/) and its Apple-Silicon
-> binaries `@img/sharp-darwin-arm64` + `@img/sharp-libvips-darwin-arm64`)
-> against the Electron ABI. The explicit `npm install batch-cluster sharp`
-> guarantees both modules (required by `exiftool-vendored` and the
-> thumbnail pipeline) are present as direct dependencies. If you ever see
-> a runtime error such as
-> `Could not load the "sharp" module using the darwin-arm64 runtime`,
-> rerun the install step to rebuild the native binaries:
+> `npm install` triggers the `postinstall` hook (`electron-rebuild -f`),
+> which compiles native modules — notably
+> [`sharp`](https://sharp.pixelplumbing.com/) (`@img/sharp-darwin-arm64` +
+> `@img/sharp-libvips-darwin-arm64`) and `batch-cluster` — against the
+> Electron ABI. All three modules (`sharp`, `exiftool-vendored`,
+> `batch-cluster`) are explicit direct dependencies and are automatically
+> extracted from the asar archive via `packagerConfig.asarUnpack` in
+> `forge.config.ts`, so they are available as real files at runtime.
+>
+> If you ever see a runtime error such as
+> `Could not load the "sharp" module using the darwin-arm64 runtime` or
+> `Cannot find module 'batch-cluster'`, rebuild native modules:
 >
 > ```bash
-> npm install --include=optional sharp
+> npm install --include=optional
 > npx electron-rebuild -f
 > ```
 
 The packaged `Lumina Forge.app` ships with the custom Canva-designed
 Lumina Forge logo (`logo.icns`) as its macOS application icon, wired up
-through `forge.config.ts` (`packagerConfig.icon` + `extraResource`).
+through `forge.config.ts` (`packagerConfig.icon: './logo.icns'` +
+`packagerConfig.extraResource`). Native runtime modules are extracted
+from the asar archive via `packagerConfig.asarUnpack`.
 
 After the build completes, `Lumina Forge.app` is automatically copied to:
 

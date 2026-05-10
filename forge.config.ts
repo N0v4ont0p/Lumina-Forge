@@ -6,18 +6,22 @@ import { VitePlugin } from '@electron-forge/plugin-vite';
 // Native modules that must NOT be bundled by Vite and must be present
 // at runtime as real files inside the packaged app's node_modules so that
 // sharp can dynamically load its `darwin-arm64` binary on Apple Silicon.
-const nativeModules = ['sharp', '@img', 'exiftool-vendored'];
+const nativeModules = ['sharp', '@img', 'exiftool-vendored', 'batch-cluster'];
 
 const config: ForgeConfig = {
   packagerConfig: {
-    icon: './logo',
+    icon: './logo.icns',
     extraResource: ['./logo.icns'],
-    asar: {
-      // Belt-and-suspenders alongside AutoUnpackNativesPlugin: ensure sharp
-      // and its platform-specific binaries are extracted from the asar so
-      // that .node files can be loaded at runtime on macOS arm64.
-      unpack: '**/node_modules/{sharp,@img/**,exiftool-vendored*}/**/*',
-    },
+    // Extract native modules from the asar archive so that .node binaries
+    // (sharp, exiftool-vendored's exiftool binary, and batch-cluster) can
+    // be loaded at runtime on macOS arm64.  Belt-and-suspenders alongside
+    // AutoUnpackNativesPlugin below.
+    asarUnpack: [
+      '**/node_modules/exiftool-vendored/**',
+      '**/node_modules/batch-cluster/**',
+      '**/node_modules/sharp/**',
+      '**/node_modules/@img/**',
+    ],
     appBundleId: 'com.luminaforge.app',
     appCategoryType: 'public.app-category.photography',
     osxSign: false,
