@@ -1,20 +1,68 @@
 import Foundation
+import ImageIO
 
-// MARK: - Metadata Actor
+// MARK: - MetadataActor
 
-/// Thread-safe actor responsible for reading, writing, and caching
-/// image metadata using ExifTool.
+/// Production-grade background actor responsible for all image-metadata I/O.
+///
+/// ## Architecture
+///
+/// ### Two-pass loading (optimised for 20 k+ libraries)
+///
+/// 1. **Fast pass – ImageIO (no subprocess).**
+///    `readQuickMetadata(from:)` reads basic EXIF / TIFF / GPS / IPTC fields
+///    straight from the file's embedded IFDs via `CGImageSourceCopyProperties`.
+///    This runs synchronously and is called immediately for every asset so the
+///    UI grid populates within milliseconds.
+///
+/// 2. **Full pass – ExifTool (batched subprocess).**
+///    URLs are chunked into batches of up to 500 and submitted to the bundled
+///    ExifTool binary in parallel TaskGroups.  ExifTool handles every vendor
+///    extension (Canon CR3, Nikon NEF, Sony ARW, Fuji RAF, DJI XMP, …).
+///    An `AsyncSemaphore` caps concurrent ExifTool processes to avoid
+///    overwhelming the OS scheduler.
+///
+/// ### Non-blocking subprocesses
+///
+/// `Process.terminationHandler` is used instead of `waitUntilExit()` so no
+/// thread from the cooperative pool is ever blocked.
+///
+/// ### Undo stack
+///
+/// Every successful `writeMetadata` call pushes a `MetadataEdit` onto a
+/// per-asset ring buffer (capped at `maxUndoDepth`).  `undo(for:)` pops the
+/// most recent edit and re-applies the previous state.
 @Observable
 actor MetadataActor {
 
     // MARK: - Published State
 
+    /// All currently loaded image assets.
     private(set) var assets: [ImageAsset] = []
+
+    /// `true` while a load operation is in progress.
     private(set) var isLoading = false
+
+    /// Fractional progress of the current load (0.0 – 1.0).
+    private(set) var loadProgress: Double = 0
 
     var assetCount: Int { assets.count }
 
-    // MARK: - ExifTool Path
+    // MARK: - Undo Stack
+    // Maps asset.id → ring buffer of MetadataEdit records.
+
+    private var undoStack: [UUID: [MetadataEdit]] = [:]
+    private let maxUndoDepth = 100
+
+    // MARK: - Concurrency Control
+
+    /// Caps concurrent ExifTool processes to prevent scheduler saturation.
+    private let semaphore = AsyncSemaphore(limit: 8)
+
+    /// Number of files per ExifTool batch invocation.
+    private let batchSize = 500
+
+    // MARK: - ExifTool Binary
 
     private var exifToolURL: URL? {
         Bundle.main.url(
@@ -24,182 +72,601 @@ actor MetadataActor {
         )
     }
 
-    // MARK: - Load Assets
+    // MARK: ─── LOAD ─────────────────────────────────────────────────────────
 
+    /// Load assets from an array of file / directory URLs.
+    ///
+    /// - Deduplicates against already-loaded assets.
+    /// - Immediately creates `ImageAsset` stubs so the grid renders.
+    /// - Runs a fast ImageIO pass synchronously on the actor.
+    /// - Runs a full ExifTool pass in a concurrent `TaskGroup`.
     func loadAssets(from urls: [URL]) async {
-        isLoading = true
-        defer { isLoading = false }
+        // Expand any directories to image files.
+        let fileURLs = expandToImageFiles(urls)
+        let newURLs  = fileURLs.filter { url in !assets.contains { $0.url == url } }
+        guard !newURLs.isEmpty else { return }
 
-        for url in urls {
-            guard !assets.contains(where: { $0.url == url }) else { continue }
+        isLoading    = true
+        loadProgress = 0
+        defer { isLoading = false; loadProgress = 1 }
+
+        let total = Double(newURLs.count)
+        var completed = 0
+
+        // ── Step 1: Create stubs immediately ──────────────────────────────
+        var newAssets: [ImageAsset] = newURLs.map { url in
             let asset = ImageAsset(url: url)
-            assets.append(asset)
-            asset.metadata = await readMetadata(for: url)
+            asset.cachedFileSize = ImageAsset.diskFileSize(for: url)
+            return asset
+        }
+        assets.append(contentsOf: newAssets)
+
+        // ── Step 2: Fast ImageIO pass ──────────────────────────────────────
+        // Runs without a subprocess; safe to iterate sequentially on the actor.
+        for asset in newAssets {
+            if let quick = Self.readQuickMetadata(from: asset.url) {
+                asset.metadata          = quick
+                asset.isMetadataLoaded  = true
+            }
+        }
+
+        // ── Step 3: Full ExifTool pass (batched, concurrent) ──────────────
+        guard let _ = exifToolURL else { return }   // binary not bundled yet
+
+        let batches = stride(from: 0, to: newAssets.count, by: batchSize).map {
+            Array(newAssets[$0 ..< min($0 + batchSize, newAssets.count)])
+        }
+
+        await withTaskGroup(of: [(UUID, MetadataModel?)].self) { group in
+            for batch in batches {
+                let batchURLs = batch.map(\.url)
+                let batchIDs  = batch.map(\.id)
+
+                group.addTask { [weak self] in
+                    guard let self else { return [] }
+
+                    // Throttle: at most `semaphore.limit` batches at once.
+                    await self.semaphore.wait()
+                    defer { Task { await self.semaphore.signal() } }
+
+                    let results = await self.readFullMetadataBatch(urls: batchURLs)
+                    return zip(batchIDs, results).map { ($0.0, $0.1) }
+                }
+            }
+
+            for await batchResults in group {
+                for (assetID, meta) in batchResults {
+                    if let meta,
+                       let asset = newAssets.first(where: { $0.id == assetID }) {
+                        asset.metadata         = meta
+                        asset.isMetadataLoaded = true
+                    }
+                }
+                completed  += batchSize
+                loadProgress = min(Double(completed) / total, 1.0)
+            }
         }
     }
 
-    // MARK: - Toggle Favorite
+    // MARK: ─── FAST READ – ImageIO ──────────────────────────────────────────
 
-    func toggleFavorite(_ asset: ImageAsset) {
-        asset.isFavorite.toggle()
+    /// Reads basic EXIF / GPS / IPTC data via `CGImageSource` – no subprocess.
+    ///
+    /// Returns `nil` when the file cannot be opened or has no readable metadata.
+    /// Declared `static` and `nonisolated` so it can be called from TaskGroup
+    /// child tasks without hopping to the actor executor.
+    static func readQuickMetadata(from url: URL) -> MetadataModel? {
+        guard
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let props  = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                            as? [CFString: Any]
+        else { return nil }
+
+        var m = MetadataModel()
+        m.sourceURL = url
+
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let gps  = props[kCGImagePropertyGPSDictionary]  as? [CFString: Any] ?? [:]
+        let iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
+
+        // TIFF / hardware
+        m.cameraMake        = tiff[kCGImagePropertyTIFFMake]  as? String
+        m.cameraModel       = tiff[kCGImagePropertyTIFFModel] as? String
+        m.software          = tiff[kCGImagePropertyTIFFSoftware] as? String
+        m.imageDescription  = tiff[kCGImagePropertyTIFFImageDescription] as? String
+        m.orientation       = (tiff[kCGImagePropertyTIFFOrientation] as? NSNumber)?.intValue
+
+        // Pixel dimensions
+        m.imageWidth  = (props[kCGImagePropertyPixelWidth]  as? NSNumber)?.intValue
+        m.imageHeight = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+
+        // Exposure
+        m.iso                  = (exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber])?.first?.intValue
+        m.aperture             = (exif[kCGImagePropertyExifFNumber]         as? NSNumber)?.doubleValue
+        m.shutterSpeed         = (exif[kCGImagePropertyExifExposureTime]    as? NSNumber)?.doubleValue
+        m.focalLength          = (exif[kCGImagePropertyExifFocalLength]     as? NSNumber)?.doubleValue
+        m.focalLengthIn35mm    = (exif[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue
+        m.exposureCompensation = (exif[kCGImagePropertyExifExposureBiasValue] as? NSNumber)?.doubleValue
+        m.lensModel            = exif[kCGImagePropertyExifLensModel] as? String
+        m.flash                = (exif[kCGImagePropertyExifFlash] as? NSNumber).map { "\($0)" }
+        m.exposureMode         = (exif[kCGImagePropertyExifExposureMode] as? NSNumber)
+                                    .map { Self.exposureModeName($0.intValue) }
+        m.meteringMode         = (exif[kCGImagePropertyExifMeteringMode] as? NSNumber)
+                                    .map { Self.meteringModeName($0.intValue) }
+
+        // Dates
+        let fmt = DateFormatter.exifFormat
+        if let s = exif[kCGImagePropertyExifDateTimeOriginal]  as? String { m.dateTimeOriginal  = fmt.date(from: s) }
+        if let s = exif[kCGImagePropertyExifDateTimeDigitized] as? String { m.dateTimeDigitized = fmt.date(from: s) }
+        if let s = tiff[kCGImagePropertyTIFFDateTime]          as? String { m.dateTimeModified  = fmt.date(from: s) }
+
+        // GPS
+        if let lat = gps[kCGImagePropertyGPSLatitude]  as? Double,
+           let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
+            let latRef = gps[kCGImagePropertyGPSLatitudeRef]  as? String ?? "N"
+            let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
+            m.gpsLatitude  = latRef == "S" ? -lat : lat
+            m.gpsLongitude = lonRef == "W" ? -lon : lon
+        }
+        m.gpsAltitude = (gps[kCGImagePropertyGPSAltitude] as? NSNumber)?.doubleValue
+
+        // IPTC (basic fields that ImageIO exposes)
+        m.copyright = iptc[kCGImagePropertyIPTCCopyrightNotice] as? String
+        m.creator   = iptc[kCGImagePropertyIPTCByline] as? String
+        m.caption   = iptc[kCGImagePropertyIPTCCaptionAbstract] as? String
+        m.headline  = iptc[kCGImagePropertyIPTCHeadline] as? String
+        m.keywords  = iptc[kCGImagePropertyIPTCKeywords] as? [String]
+        m.city      = iptc[kCGImagePropertyIPTCCity] as? String
+        m.state     = iptc[kCGImagePropertyIPTCProvinceState] as? String
+        m.country   = iptc[kCGImagePropertyIPTCCountryPrimaryLocationName] as? String
+        m.source    = iptc[kCGImagePropertyIPTCSource] as? String
+        m.credit    = iptc[kCGImagePropertyIPTCCredit] as? String
+
+        return m
     }
 
-    // MARK: - Export Queue
+    // MARK: ─── FULL READ – ExifTool (batched) ───────────────────────────────
 
-    func addToExportQueue(_ asset: ImageAsset) {
-        asset.isInExportQueue = true
-    }
+    /// Invoke ExifTool once for an entire batch of URLs and parse the JSON array.
+    ///
+    /// Returns one `MetadataModel?` per input URL (preserving order).
+    /// `nil` entries indicate files ExifTool could not parse.
+    private func readFullMetadataBatch(urls: [URL]) async -> [MetadataModel?] {
+        guard let tool = exifToolURL else { return Array(repeating: nil, count: urls.count) }
 
-    func removeFromExportQueue(_ asset: ImageAsset) {
-        asset.isInExportQueue = false
-    }
+        var args: [String] = [
+            "-json", "-n", "-charset", "UTF8",
+            "-EXIF:All", "-IPTC:All", "-XMP:All", "-GPS:All",
+            "-d", "%Y:%m:%d %H:%M:%S",     // normalise date output
+        ]
+        args.append(contentsOf: urls.map { $0.path(percentEncoded: false) })
 
-    // MARK: - Read Metadata via ExifTool
-
-    func readMetadata(for url: URL) async -> MetadataModel? {
-        guard let exifTool = exifToolURL else {
-            // ExifTool binary not bundled yet; return nil gracefully
-            return nil
+        guard let data = await runExifToolProcess(tool: tool, arguments: args),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else {
+            return Array(repeating: nil, count: urls.count)
         }
 
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = exifTool
-            process.arguments = [
-                "-json",
-                "-n",          // Numeric output for aperture, shutter, etc.
-                "-EXIF:All",
-                "-IPTC:All",
-                "-XMP:All",
-                url.path(percentEncoded: false)
+        // ExifTool output preserves input order.
+        return zip(urls, array).map { url, dict in
+            parseExifToolDict(dict, sourceURL: url)
+        }
+    }
+
+    // MARK: ─── WRITE METADATA ────────────────────────────────────────────────
+
+    /// Write user-edited metadata fields to the file on disk.
+    ///
+    /// All IPTC and XMP namespaces are written simultaneously.  GPS coordinates
+    /// are written with correct hemisphere reference tags.  Keywords replace
+    /// the existing set (clear-then-add).
+    ///
+    /// Before writing, the current metadata is saved to the undo stack.
+    /// After writing succeeds, the in-memory model is updated.
+    ///
+    /// - Throws: `MetadataError.exifToolNotFound` / `MetadataError.writeFailed`.
+    func writeMetadata(_ metadata: MetadataModel, to asset: ImageAsset) async throws {
+        guard let tool = exifToolURL else { throw MetadataError.exifToolNotFound }
+
+        // Push undo before modifying anything.
+        pushUndo(assetID: asset.id, before: asset.metadata, after: metadata)
+
+        var args: [String] = ["-overwrite_original", "-charset", "UTF8"]
+
+        // Helper: set the same value in both IPTC and XMP namespaces.
+        func set(iptc: String, xmp: String, value: String?) {
+            guard let v = value else { return }
+            args.append("-IPTC:\(iptc)=\(v)")
+            args.append("-XMP:\(xmp)=\(v)")
+        }
+
+        set(iptc: "ObjectName",              xmp: "Title",       value: metadata.title)
+        set(iptc: "Headline",                xmp: "Headline",    value: metadata.headline)
+        set(iptc: "Caption-Abstract",        xmp: "Description", value: metadata.caption)
+        set(iptc: "CopyrightNotice",         xmp: "Rights",      value: metadata.copyright)
+        set(iptc: "By-line",                 xmp: "Creator",     value: metadata.creator)
+        set(iptc: "By-lineTitle",            xmp: "CreatorTitle",value: metadata.creatorTitle)
+        set(iptc: "Credit",                  xmp: "Credit",      value: metadata.credit)
+        set(iptc: "Source",                  xmp: "Source",      value: metadata.source)
+        set(iptc: "City",                    xmp: "City",        value: metadata.city)
+        set(iptc: "Province-State",          xmp: "State",       value: metadata.state)
+        set(iptc: "Country-PrimaryLocationName", xmp: "Country", value: metadata.country)
+        set(iptc: "Country-PrimaryLocationCode", xmp: "CountryCode", value: metadata.countryCode)
+        set(iptc: "Sub-location",            xmp: "Location",    value: metadata.location)
+        set(iptc: "SpecialInstructions",     xmp: "Instructions",value: metadata.instructions)
+
+        if let label = metadata.label { args.append("-XMP:Label=\(label)") }
+
+        // EXIF ImageDescription (ASCII legacy field, separate from IPTC)
+        if let desc = metadata.imageDescription { args.append("-EXIF:ImageDescription=\(desc)") }
+
+        // Keywords – clear existing set then re-add (atomic replace)
+        args.append("-IPTC:Keywords=")
+        args.append("-XMP:Subject=")
+        for kw in (metadata.keywords ?? []) {
+            args.append("-IPTC:Keywords+=\(kw)")
+            args.append("-XMP:Subject+=\(kw)")
+        }
+
+        // Rating (XMP only; 0 = no star)
+        if let r = metadata.rating { args.append("-XMP:Rating=\(r)") }
+
+        // GPS – write decimal + hemisphere ref tags
+        if let lat = metadata.gpsLatitude, let lon = metadata.gpsLongitude {
+            args += [
+                "-GPS:GPSLatitude=\(abs(lat))",
+                "-GPS:GPSLatitudeRef=\(lat >= 0 ? "N" : "S")",
+                "-GPS:GPSLongitude=\(abs(lon))",
+                "-GPS:GPSLongitudeRef=\(lon >= 0 ? "E" : "W")",
             ]
+            if let alt = metadata.gpsAltitude {
+                args += [
+                    "-GPS:GPSAltitude=\(abs(alt))",
+                    "-GPS:GPSAltitudeRef=\(alt >= 0 ? 0 : 1)",
+                ]
+            }
+        }
 
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
+        args.append(asset.url.path(percentEncoded: false))
+
+        guard let _ = await runExifToolProcess(tool: tool, arguments: args, expectOutput: false) else {
+            throw MetadataError.writeFailed(asset.url)
+        }
+
+        // Update in-memory model and clear the dirty flag.
+        var saved = metadata
+        saved.hasUnsavedChanges = false
+        asset.metadata = saved
+    }
+
+    // MARK: ─── STRIP ALL METADATA ────────────────────────────────────────────
+
+    /// Remove ALL metadata from a file (privacy scrub / clean export).
+    ///
+    /// This is irreversible on disk but an undo record is pushed so the
+    /// in-memory state can be restored within the session.
+    func stripAllMetadata(from asset: ImageAsset) async throws {
+        guard let tool = exifToolURL else { throw MetadataError.exifToolNotFound }
+
+        pushUndo(assetID: asset.id, before: asset.metadata, after: MetadataModel())
+
+        let args = ["-all=", "-overwrite_original", asset.url.path(percentEncoded: false)]
+        guard let _ = await runExifToolProcess(tool: tool, arguments: args, expectOutput: false) else {
+            throw MetadataError.writeFailed(asset.url)
+        }
+
+        var empty = MetadataModel()
+        empty.sourceURL = asset.url
+        asset.metadata = empty
+    }
+
+    // MARK: ─── SIDECAR XMP EXPORT ────────────────────────────────────────────
+
+    /// Export all XMP metadata for an asset as a companion `.xmp` sidecar file.
+    ///
+    /// - Parameter directory: Output directory; defaults to the image's folder.
+    /// - Returns: The URL of the created `.xmp` file.
+    /// - Throws: `MetadataError.sidecarExportFailed` on ExifTool error.
+    @discardableResult
+    func exportSidecarXMP(for asset: ImageAsset, to directory: URL? = nil) async throws -> URL {
+        guard let tool = exifToolURL else { throw MetadataError.exifToolNotFound }
+
+        let baseDir = directory ?? asset.url.deletingLastPathComponent()
+        let sidecarURL = baseDir
+            .appendingPathComponent(asset.url.deletingPathExtension().lastPathComponent)
+            .appendingPathExtension("xmp")
+
+        let args: [String] = [
+            "-TagsFromFile", asset.url.path(percentEncoded: false),
+            "-XMP:All",
+            "-o", sidecarURL.path(percentEncoded: false),
+        ]
+        guard let _ = await runExifToolProcess(tool: tool, arguments: args, expectOutput: false) else {
+            throw MetadataError.sidecarExportFailed(asset.url)
+        }
+        return sidecarURL
+    }
+
+    // MARK: ─── BATCH HELPERS ─────────────────────────────────────────────────
+
+    /// Export metadata for all assets in the export queue, writing JSON files
+    /// alongside each image.
+    func batchExportJSON(to directory: URL) async throws {
+        let queue = assets.filter(\.isInExportQueue)
+        for asset in queue {
+            guard let meta = asset.metadata else { continue }
+            let dict   = meta.asDictionary()
+            let data   = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)
+            let outURL = directory
+                .appendingPathComponent(asset.url.deletingPathExtension().lastPathComponent)
+                .appendingPathExtension("json")
+            try data.write(to: outURL)
+        }
+    }
+
+    // MARK: ─── UNDO / REDO ───────────────────────────────────────────────────
+
+    /// `true` when there is at least one undo entry for the asset.
+    func canUndo(for assetID: UUID) -> Bool {
+        undoStack[assetID]?.isEmpty == false
+    }
+
+    /// Revert to the metadata state before the last write.
+    /// Note: calling `undo` itself pushes a new undo entry (the undo action
+    /// can also be undone for multi-level history).
+    func undo(for asset: ImageAsset) async throws {
+        guard let edit = undoStack[asset.id]?.popLast(),
+              let previous = edit.beforeMetadata
+        else { return }
+        try await writeMetadata(previous, to: asset)
+        // Remove the entry that `writeMetadata` just pushed (redo not yet supported).
+        undoStack[asset.id]?.removeLast()
+    }
+
+    // MARK: ─── FAVORITES & EXPORT QUEUE ─────────────────────────────────────
+
+    func toggleFavorite(_ asset: ImageAsset)         { asset.isFavorite.toggle() }
+    func addToExportQueue(_ asset: ImageAsset)        { asset.isInExportQueue = true }
+    func removeFromExportQueue(_ asset: ImageAsset)   { asset.isInExportQueue = false }
+
+    func batchAddToExportQueue(_ assets: [ImageAsset]) {
+        assets.forEach { $0.isInExportQueue = true }
+    }
+
+    // MARK: ─── PRIVATE: SUBPROCESS ───────────────────────────────────────────
+
+    /// Run ExifTool as a non-blocking subprocess using `terminationHandler`.
+    ///
+    /// Stdout is collected via a `Pipe`.  The method suspends the calling
+    /// Task (not an OS thread) until the process exits.
+    ///
+    /// - Parameters:
+    ///   - tool:         URL to the ExifTool binary.
+    ///   - arguments:    Command-line arguments.
+    ///   - expectOutput: When `false`, returns an empty `Data` on success
+    ///                   (avoids buffering large outputs when we only care
+    ///                   about exit status).
+    /// - Returns: Stdout data on success, `nil` on non-zero exit or launch error.
+    private func runExifToolProcess(
+        tool: URL,
+        arguments: [String],
+        expectOutput: Bool = true
+    ) async -> Data? {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = tool
+            process.arguments     = arguments
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError  = errPipe
+
+            // terminationHandler fires on a dispatch queue – never blocks a thread.
+            process.terminationHandler = { proc in
+                guard proc.terminationStatus == 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let data = expectOutput
+                    ? outPipe.fileHandleForReading.readDataToEndOfFile()
+                    : Data()
+                continuation.resume(returning: data)
+            }
 
             do {
                 try process.run()
-                process.waitUntilExit()
-
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let metadata = parseExifToolJSON(data)
-                continuation.resume(returning: metadata)
             } catch {
                 continuation.resume(returning: nil)
             }
         }
     }
 
-    // MARK: - Write Metadata via ExifTool
+    // MARK: ─── PRIVATE: JSON PARSING ─────────────────────────────────────────
 
-    func writeMetadata(_ metadata: MetadataModel, to url: URL) async throws {
-        guard let exifTool = exifToolURL else {
-            throw MetadataError.exifToolNotFound
-        }
+    /// Map a single ExifTool JSON dictionary to a `MetadataModel`.
+    private func parseExifToolDict(_ dict: [String: Any], sourceURL: URL) -> MetadataModel? {
+        var m = MetadataModel()
+        m.sourceURL = sourceURL
 
-        var arguments: [String] = ["-overwrite_original"]
+        // Camera hardware
+        m.cameraMake           = dict["Make"]       as? String
+        m.cameraModel          = dict["Model"]      as? String
+        m.lensModel            = dict["LensModel"]  as? String
+        m.software             = dict["Software"]   as? String
 
-        if let title = metadata.title {
-            arguments += ["-Title=\(title)", "-XMP:Title=\(title)"]
-        }
-        if let description = metadata.imageDescription {
-            arguments += ["-Description=\(description)", "-XMP:Description=\(description)"]
-        }
-        if let copyright = metadata.copyright {
-            arguments += ["-Copyright=\(copyright)", "-XMP:Rights=\(copyright)"]
-        }
-        if let creator = metadata.creator {
-            arguments += ["-Artist=\(creator)", "-XMP:Creator=\(creator)"]
-        }
-        if let keywords = metadata.keywords {
-            for keyword in keywords {
-                arguments += ["-Keywords+=\(keyword)"]
+        // Exposure
+        m.iso                  = dict["ISO"]                as? Int
+        m.aperture             = dict["FNumber"]            as? Double
+        m.shutterSpeed         = dict["ExposureTime"]       as? Double
+        m.focalLength          = dict["FocalLength"]        as? Double
+        m.focalLengthIn35mm    = dict["FocalLengthIn35mmFormat"] as? Int
+        m.exposureCompensation = dict["ExposureCompensation"] as? Double
+        m.whiteBalance         = dict["WhiteBalance"]       as? String
+        m.flash                = dict["Flash"]              as? String
+        m.exposureMode         = dict["ExposureMode"]       as? String
+        m.meteringMode         = dict["MeteringMode"]       as? String
+        m.exposureProgram      = dict["ExposureProgram"]    as? String
+        m.sceneCaptureType     = dict["SceneCaptureType"]   as? String
+
+        // Geometry
+        m.imageWidth           = dict["ImageWidth"]   as? Int
+        m.imageHeight          = dict["ImageHeight"]  as? Int
+        m.colorSpace           = dict["ColorSpace"]   as? String
+        m.bitsPerSample        = dict["BitsPerSample"] as? Int
+        m.orientation          = dict["Orientation"]  as? Int
+
+        // Dates
+        let fmt = DateFormatter.exifFormat
+        if let s = dict["DateTimeOriginal"]  as? String { m.dateTimeOriginal  = fmt.date(from: s) }
+        if let s = dict["DateTimeDigitized"] as? String { m.dateTimeDigitized = fmt.date(from: s) }
+        if let s = dict["ModifyDate"]        as? String { m.dateTimeModified  = fmt.date(from: s) }
+
+        // GPS (ExifTool with -n returns decimal degrees with sign)
+        m.gpsLatitude          = dict["GPSLatitude"]    as? Double
+        m.gpsLongitude         = dict["GPSLongitude"]   as? Double
+        m.gpsAltitude          = dict["GPSAltitude"]    as? Double
+        m.gpsSpeed             = dict["GPSSpeed"]       as? Double
+        m.gpsDirection         = dict["GPSImgDirection"] as? Double
+
+        // IPTC / XMP editorial
+        m.title                = dict["Title"]                          as? String
+        m.headline             = dict["Headline"]                       as? String
+        m.caption              = (dict["Description"] as? String)
+                                 ?? (dict["Caption-Abstract"] as? String)
+        m.imageDescription     = dict["ImageDescription"]               as? String
+        m.credit               = dict["Credit"]                         as? String
+        m.source               = dict["Source"]                         as? String
+        m.copyright            = dict["Copyright"]                      as? String
+        m.copyrightStatus      = dict["CopyrightStatus"]                as? String
+        if let creators = dict["Creator"] as? [String] { m.creator     = creators.first }
+        else                                            { m.creator     = dict["Artist"] as? String }
+        m.creatorTitle         = dict["By-lineTitle"]                   as? String
+        m.keywords             = (dict["Keywords"]  as? [String])
+                                 ?? (dict["Subject"] as? [String])
+        m.instructions         = dict["SpecialInstructions"]            as? String
+        m.rating               = dict["Rating"]                         as? Int
+        m.label                = dict["Label"]                          as? String
+
+        // Location
+        m.city                 = dict["City"]                                   as? String
+        m.state                = dict["Province-State"]                         as? String
+        m.country              = dict["Country-PrimaryLocationName"]            as? String
+        m.countryCode          = dict["Country-PrimaryLocationCode"]            as? String
+        m.location             = dict["Sub-location"]                           as? String
+
+        return m
+    }
+
+    // MARK: ─── PRIVATE: UNDO ────────────────────────────────────────────────
+
+    private func pushUndo(assetID: UUID, before: MetadataModel?, after: MetadataModel) {
+        var stack = undoStack[assetID] ?? []
+        stack.append(MetadataEdit(beforeMetadata: before, afterMetadata: after))
+        if stack.count > maxUndoDepth { stack.removeFirst() }
+        undoStack[assetID] = stack
+    }
+
+    // MARK: ─── PRIVATE: DIRECTORY EXPANSION ─────────────────────────────────
+
+    /// Recursively expand directory URLs to supported image file URLs.
+    private func expandToImageFiles(_ urls: [URL]) -> [URL] {
+        let supportedExtensions: Set<String> = [
+            "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff",
+            "gif", "bmp", "webp",
+            // RAW formats
+            "cr2", "cr3", "nef", "arw", "rw2", "raf", "orf",
+            "dng", "pef", "srw", "x3f", "mrw",
+        ]
+        var result: [URL] = []
+        let fm = FileManager.default
+
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path(percentEncoded: false), isDirectory: &isDir) else { continue }
+
+            if isDir.boolValue {
+                let enumerator = fm.enumerator(
+                    at: url,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                )
+                while let child = enumerator?.nextObject() as? URL {
+                    if supportedExtensions.contains(child.pathExtension.lowercased()) {
+                        result.append(child)
+                    }
+                }
+            } else {
+                if supportedExtensions.contains(url.pathExtension.lowercased()) {
+                    result.append(url)
+                }
             }
         }
+        return result
+    }
 
-        arguments.append(url.path(percentEncoded: false))
+    // MARK: ─── PRIVATE: EXIF CODE → STRING ──────────────────────────────────
 
-        let process = Process()
-        process.executableURL = exifTool
-        process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            throw MetadataError.writeFailed(url)
+    private static func exposureModeName(_ value: Int) -> String {
+        switch value {
+        case 0: return "Auto"
+        case 1: return "Manual"
+        case 2: return "Auto bracket"
+        default: return "Unknown (\(value))"
         }
     }
 
-    // MARK: - JSON Parsing
-
-    private func parseExifToolJSON(_ data: Data) -> MetadataModel? {
-        guard
-            let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-            let dict = array.first
-        else { return nil }
-
-        var model = MetadataModel()
-
-        model.cameraModel     = dict["Model"] as? String
-        model.cameraMake      = dict["Make"] as? String
-        model.lensModel       = dict["LensModel"] as? String
-        model.iso             = dict["ISO"] as? Int
-        model.aperture        = dict["FNumber"] as? Double
-        model.shutterSpeed    = dict["ExposureTime"] as? Double
-        model.focalLength     = dict["FocalLength"] as? Double
-        model.focalLengthIn35mm = dict["FocalLengthIn35mmFormat"] as? Int
-        model.whiteBalance    = dict["WhiteBalance"] as? String
-        model.flash           = dict["Flash"] as? String
-        model.imageWidth      = dict["ImageWidth"] as? Int
-        model.imageHeight     = dict["ImageHeight"] as? Int
-        model.colorSpace      = dict["ColorSpace"] as? String
-
-        if let dateStr = dict["DateTimeOriginal"] as? String {
-            model.dateTimeOriginal = parseExifDate(dateStr)
+    private static func meteringModeName(_ value: Int) -> String {
+        switch value {
+        case 1: return "Average"
+        case 2: return "Center-weighted"
+        case 3: return "Spot"
+        case 4: return "Multi-spot"
+        case 5: return "Multi-segment"
+        case 6: return "Partial"
+        default: return "Unknown (\(value))"
         }
-
-        model.gpsLatitude     = dict["GPSLatitude"] as? Double
-        model.gpsLongitude    = dict["GPSLongitude"] as? Double
-        model.gpsAltitude     = dict["GPSAltitude"] as? Double
-
-        model.title           = dict["Title"] as? String
-        model.imageDescription = dict["Description"] as? String
-        model.copyright       = dict["Copyright"] as? String
-        if let creators = dict["Creator"] as? [String] {
-            model.creator = creators.first
-        } else {
-            model.creator = dict["Artist"] as? String
-        }
-        model.keywords        = dict["Keywords"] as? [String]
-        model.rating          = dict["Rating"] as? Int
-
-        return model
-    }
-
-    private func parseExifDate(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.date(from: string)
     }
 }
 
-// MARK: - Metadata Errors
+// MARK: - Undo Record
+
+/// Immutable snapshot of a metadata change for undo/redo support.
+struct MetadataEdit: Sendable {
+    let beforeMetadata: MetadataModel?
+    let afterMetadata: MetadataModel
+    let date: Date = .now
+}
+
+// MARK: - Errors
 
 enum MetadataError: LocalizedError {
     case exifToolNotFound
     case writeFailed(URL)
+    case sidecarExportFailed(URL)
 
     var errorDescription: String? {
         switch self {
         case .exifToolNotFound:
-            return "ExifTool binary was not found in the app bundle."
+            return "ExifTool binary was not found in the app bundle. " +
+                   "Place the binary at Resources/ExifTool/exiftool."
         case .writeFailed(let url):
-            return "Failed to write metadata to \(url.lastPathComponent)."
+            return "Failed to write metadata to "\(url.lastPathComponent)"."
+        case .sidecarExportFailed(let url):
+            return "Failed to export XMP sidecar for "\(url.lastPathComponent)"."
         }
     }
+}
+
+// MARK: - DateFormatter
+
+extension DateFormatter {
+    /// Shared formatter for EXIF date strings (`"yyyy:MM:dd HH:mm:ss"`).
+    static let exifFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 }

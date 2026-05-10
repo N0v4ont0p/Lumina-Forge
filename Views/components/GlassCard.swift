@@ -13,10 +13,7 @@ struct GlassCard: View {
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .bottomLeading) {
-                // Thumbnail
                 thumbnailView
-
-                // Metadata Overlay
                 metadataOverlay
             }
         }
@@ -43,6 +40,11 @@ struct GlassCard: View {
         )
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isSelected)
+        // Kick off thumbnail generation when the card first appears.
+        .task(id: asset.id) {
+            guard !asset.isThumbnailLoaded else { return }
+            _ = await thumbnailActor.thumbnail(for: asset.url, asset: asset)
+        }
     }
 
     // MARK: - Thumbnail View
@@ -57,9 +59,16 @@ struct GlassCard: View {
             } else {
                 ZStack {
                     Color(.controlBackgroundColor)
-                    Image(systemName: "photo")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.tertiary)
+                    if asset.isThumbnailLoaded {
+                        // Generation finished but returned nil (unsupported format)
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        // Still loading
+                        ProgressView()
+                            .controlSize(.small)
+                    }
                 }
             }
         }
@@ -71,7 +80,7 @@ struct GlassCard: View {
 
     private var metadataOverlay: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(asset.fileName)
+            Text(asset.displayTitle)
                 .font(.caption.bold())
                 .lineLimit(1)
                 .truncationMode(.middle)

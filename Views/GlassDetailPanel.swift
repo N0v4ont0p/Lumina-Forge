@@ -75,15 +75,19 @@ struct GlassDetailPanel: View {
     private func exifSection(for asset: ImageAsset) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("EXIF Data")
-            if let metadata = asset.metadata {
-                metadataRow("Camera", value: metadata.cameraModel ?? "—")
-                metadataRow("Lens", value: metadata.lensModel ?? "—")
-                metadataRow("ISO", value: metadata.iso.map { "\($0)" } ?? "—")
-                metadataRow("Aperture", value: metadata.formattedAperture)
-                metadataRow("Shutter Speed", value: metadata.formattedShutterSpeed)
-                metadataRow("Focal Length", value: metadata.formattedFocalLength)
-                metadataRow("White Balance", value: metadata.whiteBalance ?? "—")
-                metadataRow("Flash", value: metadata.flash ?? "—")
+            if let m = asset.metadata {
+                metadataRow("Camera",        value: [m.cameraMake, m.cameraModel].compactMap { $0 }.joined(separator: " ").nilIfEmpty ?? "—")
+                metadataRow("Lens",          value: m.lensModel ?? "—")
+                metadataRow("ISO",           value: m.formattedISO)
+                metadataRow("Aperture",      value: m.formattedAperture)
+                metadataRow("Shutter Speed", value: m.formattedShutterSpeed)
+                metadataRow("Focal Length",  value: m.formattedFocalLength)
+                metadataRow("White Balance", value: m.whiteBalance ?? "—")
+                metadataRow("Flash",         value: m.flash ?? "—")
+                metadataRow("Exposure Mode", value: m.exposureMode ?? "—")
+                if m.formattedGPS != "—" {
+                    metadataRow("GPS", value: m.formattedGPS)
+                }
             } else {
                 Text("No EXIF data available.")
                     .foregroundStyle(.tertiary)
@@ -97,12 +101,18 @@ struct GlassDetailPanel: View {
     private func iptcSection(for asset: ImageAsset) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("IPTC / XMP")
-            if let metadata = asset.metadata {
-                metadataRow("Title", value: metadata.title ?? "—")
-                metadataRow("Description", value: metadata.imageDescription ?? "—")
-                metadataRow("Copyright", value: metadata.copyright ?? "—")
-                metadataRow("Creator", value: metadata.creator ?? "—")
-                metadataRow("Keywords", value: metadata.keywords?.joined(separator: ", ") ?? "—")
+            if let m = asset.metadata {
+                metadataRow("Title",       value: m.title ?? "—")
+                metadataRow("Headline",    value: m.headline ?? "—")
+                metadataRow("Caption",     value: m.caption ?? m.imageDescription ?? "—")
+                metadataRow("Copyright",   value: m.copyright ?? "—")
+                metadataRow("Creator",     value: m.creator ?? "—")
+                metadataRow("Credit",      value: m.credit ?? "—")
+                metadataRow("Source",      value: m.source ?? "—")
+                metadataRow("Keywords",    value: m.keywords?.joined(separator: ", ") ?? "—")
+                metadataRow("Rating",      value: m.rating.map { "\($0) ★" } ?? "—")
+                if let city = m.city { metadataRow("City", value: city) }
+                if let country = m.country { metadataRow("Country", value: country) }
             } else {
                 Text("No IPTC/XMP data available.")
                     .foregroundStyle(.tertiary)
@@ -174,4 +184,10 @@ struct GlassDetailPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+// MARK: - Private Helpers
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

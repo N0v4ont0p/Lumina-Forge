@@ -1,9 +1,17 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct LuminaForgeApp: App {
+    // MARK: - Actors
+
+    /// Owns the library asset list and all metadata I/O.
     @State private var metadataActor = MetadataActor()
+
+    /// Owns the thumbnail LRU + SwiftData cache (creates its own ModelContainer).
     @State private var thumbnailActor = ThumbnailActor()
+
+    // MARK: - Scene
 
     var body: some Scene {
         WindowGroup {
@@ -12,7 +20,7 @@ struct LuminaForgeApp: App {
                 .environment(thumbnailActor)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1200, height: 800)
+        .defaultSize(width: 1280, height: 800)
 
         Settings {
             SettingsView()
@@ -48,16 +56,22 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("ExifTool") {
-                Text("ExifTool binary path will be configured here.")
+                Text("Place the ExifTool binary at Resources/ExifTool/exiftool " +
+                     "to enable full IPTC/XMP read-write support.")
                     .foregroundStyle(.secondary)
             }
             Section("Export") {
-                Text("Default export options will appear here.")
+                Text("Default export options are configured in ExportOptions.plist.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Cache") {
+                Text("Thumbnail cache is managed automatically by ThumbnailActor " +
+                     "and stored in ~/Library/Caches/LuminaThumbCache.store.")
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .frame(width: 480, height: 320)
+        .frame(width: 480, height: 360)
     }
 }
