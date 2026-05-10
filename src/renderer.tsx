@@ -104,7 +104,10 @@ function App() {
   return (
     <div className="h-screen w-screen bg-app text-white overflow-hidden">
       <div className="h-14 px-5 flex items-center justify-between border-b border-white/10 app-drag">
-        <div className="text-sm tracking-wide opacity-80">Lumina Forge · Liquid Glass</div>
+        <div className="flex items-center gap-2 text-sm tracking-wide opacity-80">
+          <img src="/luminaforgelogo.png" alt="Lumina Forge logo" className="h-6 w-6 rounded-md object-cover border border-white/20" />
+          <span>Lumina Forge · Liquid Glass</span>
+        </div>
         <div className="text-xs opacity-60">Electron + React 19 + Tailwind + Framer Motion</div>
       </div>
 

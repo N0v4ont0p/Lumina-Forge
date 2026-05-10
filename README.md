@@ -36,6 +36,19 @@ npm install
 npm run build:mac
 ```
 
+> The `npm install` step triggers a `postinstall` hook that runs
+> `electron-rebuild -f`, which compiles native modules (notably
+> [`sharp`](https://sharp.pixelplumbing.com/) and its Apple-Silicon
+> binaries `@img/sharp-darwin-arm64` + `@img/sharp-libvips-darwin-arm64`)
+> against the Electron ABI. If you ever see a runtime error such as
+> `Could not load the "sharp" module using the darwin-arm64 runtime`,
+> rerun the install step to rebuild the native binaries:
+>
+> ```bash
+> npm install --include=optional sharp
+> npx electron-rebuild -f
+> ```
+
 After the build completes, `Lumina Forge.app` is automatically copied to:
 
 ```bash
