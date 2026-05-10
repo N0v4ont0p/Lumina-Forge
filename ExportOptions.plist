@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ── Xcode Export Archive options (used by scripts/build-dmg.sh) ──── -->
+
+    <!-- Export method for a notarized Developer-ID build outside the Mac App Store -->
+    <key>method</key>
+    <string>developer-id</string>
+
+    <!-- Sign the exported app with a Developer ID Application certificate -->
+    <key>signingStyle</key>
+    <string>automatic</string>
+
+    <!-- Embed the provisioning profile if your account has one configured -->
+    <key>provisioningProfiles</key>
+    <dict/>
+
+    <!-- Hardened Runtime is required for notarization -->
+    <key>hardCodedEntitlements</key>
+    <dict>
+        <key>com.apple.security.app-sandbox</key>
+        <true/>
+        <key>com.apple.security.files.all</key>
+        <true/>
+        <key>com.apple.security.files.downloads.read-write</key>
+        <true/>
+        <key>com.apple.security.files.user-selected.read-write</key>
+        <true/>
+    </dict>
+
+    <!-- Strip Swift symbols from the exported binary to reduce DMG size -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+
+    <!-- ── Lumina Forge Metadata Export options ───────────────────────────── -->
+
+    <!-- ExifTool integration -->
+    <key>UseExifTool</key>
+    <true/>
+
+    <!-- Output Formats -->
+    <key>DefaultOutputFormat</key>
+    <string>JSON</string>
+
+    <key>AvailableOutputFormats</key>
+    <array>
+        <string>JSON</string>
+        <string>CSV</string>
+        <string>XMP Sidecar</string>
+    </array>
+
+    <!-- File Handling -->
+    <key>OverwriteOriginal</key>
+    <false/>
+
+    <key>CreateSidecarXMP</key>
+    <true/>
+
+    <!-- Safety: temp backup is written before overwrite (see MetadataActor.writeMetadata) -->
+    <key>SafetyBackupEnabled</key>
+    <true/>
+
+    <!-- Export Destination -->
+    <key>DefaultExportDirectory</key>
+    <string>~/Desktop/LuminaForgeExports</string>
+
+    <!-- Metadata Fields to Include -->
+    <key>IncludedFields</key>
+    <array>
+        <string>FileName</string>
+        <string>FileSize</string>
+        <string>ImageWidth</string>
+        <string>ImageHeight</string>
+        <string>Make</string>
+        <string>Model</string>
+        <string>LensModel</string>
+        <string>ISO</string>
+        <string>FNumber</string>
+        <string>ExposureTime</string>
+        <string>FocalLength</string>
+        <string>DateTimeOriginal</string>
+        <string>GPSLatitude</string>
+        <string>GPSLongitude</string>
+        <string>Title</string>
+        <string>Description</string>
+        <string>Copyright</string>
+        <string>Creator</string>
+        <string>Keywords</string>
+        <string>Rating</string>
+    </array>
+
+    <!-- Batch Settings -->
+    <key>BatchConcurrencyLimit</key>
+    <integer>8</integer>
+
+    <key>BatchShowProgress</key>
+    <true/>
+</dict>
+</plist>
