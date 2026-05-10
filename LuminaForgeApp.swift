@@ -35,16 +35,21 @@ struct ContentView: View {
     @State private var selectedAsset: ImageAsset?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
+    /// Shared namespace for thumbnail hero transitions between `GlassGridView`
+    /// (cards — `isSource: true`) and `GlassDetailPanel` (header — `isSource: false`).
+    @Namespace private var heroNamespace
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             GlassSidebar(selection: $selectedSidebarItem)
         } content: {
             GlassGridView(
                 sidebarItem: selectedSidebarItem,
-                selectedAsset: $selectedAsset
+                selectedAsset: $selectedAsset,
+                heroNamespace: heroNamespace
             )
         } detail: {
-            GlassDetailPanel(asset: selectedAsset)
+            GlassDetailPanel(asset: selectedAsset, heroNamespace: heroNamespace)
         }
         .glassBackgroundEffect()
     }

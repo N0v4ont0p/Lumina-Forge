@@ -4,18 +4,37 @@ import SwiftUI
 
 struct GlassDetailPanel: View {
     let asset: ImageAsset?
+    /// Namespace shared with `GlassGridView` / `GlassCard` so hero thumbnail
+    /// transitions can be activated when the navigation architecture collapses
+    /// to a single column (the matched-geometry IDs are already wired on the
+    /// card side; the detail panel holds the `isSource: false` anchor).
+    var heroNamespace: Namespace.ID
 
     @Environment(MetadataActor.self) private var metadataActor
     @State private var isEditing = false
+
+    // Unified spring per master plan
+    private let spring = Animation.spring(response: 0.28, dampingFraction: 0.82)
 
     var body: some View {
         Group {
             if let asset {
                 detailContent(for: asset)
+                    // Assign a stable ID so SwiftUI re-runs the transition
+                    // every time a different asset is selected.
+                    .id(asset.id)
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.94, anchor: .top)
+                                .combined(with: .opacity),
+                            removal: .opacity.animation(.easeOut(duration: 0.14))
+                        )
+                    )
             } else {
                 placeholderView
             }
         }
+        .animation(spring, value: asset?.id)
         .glassBackgroundEffect()
     }
 
@@ -48,6 +67,14 @@ struct GlassDetailPanel: View {
                     .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .padding(8)
+                    // Hero transition destination anchor.
+                    // `isSource: false` means this view adopts the frame of
+                    // the matching card thumbnail when a navigation transition fires.
+                    .matchedGeometryEffect(
+                        id: "thumb_\(asset.id)",
+                        in: heroNamespace,
+                        isSource: false
+                    )
             } else {
                 Image(systemName: "photo")
                     .font(.system(size: 48))
