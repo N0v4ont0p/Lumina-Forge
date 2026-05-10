@@ -26,7 +26,7 @@ const config: ForgeConfig = {
       if (!file) return false;
       if (file.startsWith('/.vite')) return false;
       if (file === '/package.json') return false;
-      if (file === '/node_modules' || file === '/node_modules/@img') return false;
+      if (file === '/node_modules') return false;
       for (const mod of nativeModules) {
         if (file.startsWith(`/node_modules/${mod}/`)) return false;
         if (file.startsWith(`/node_modules/${mod}`)) return false;

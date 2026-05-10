@@ -17,7 +17,6 @@ export default defineConfig({
         'node_modules/@img/sharp-darwin-arm64/**/*',
         'node_modules/@img/sharp-libvips-darwin-arm64/**/*',
       ],
-      ignoreDynamicRequires: true,
     },
   },
 });
