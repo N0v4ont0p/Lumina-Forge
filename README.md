@@ -33,6 +33,7 @@
 
 ```bash
 npm install
+npm install batch-cluster sharp
 npm run build:mac
 ```
 
@@ -40,7 +41,10 @@ npm run build:mac
 > `electron-rebuild -f`, which compiles native modules (notably
 > [`sharp`](https://sharp.pixelplumbing.com/) and its Apple-Silicon
 > binaries `@img/sharp-darwin-arm64` + `@img/sharp-libvips-darwin-arm64`)
-> against the Electron ABI. If you ever see a runtime error such as
+> against the Electron ABI. The explicit `npm install batch-cluster sharp`
+> guarantees both modules (required by `exiftool-vendored` and the
+> thumbnail pipeline) are present as direct dependencies. If you ever see
+> a runtime error such as
 > `Could not load the "sharp" module using the darwin-arm64 runtime`,
 > rerun the install step to rebuild the native binaries:
 >
@@ -48,6 +52,10 @@ npm run build:mac
 > npm install --include=optional sharp
 > npx electron-rebuild -f
 > ```
+
+The packaged `Lumina Forge.app` ships with the custom Canva-designed
+Lumina Forge logo (`logo.icns`) as its macOS application icon, wired up
+through `forge.config.ts` (`packagerConfig.icon` + `extraResource`).
 
 After the build completes, `Lumina Forge.app` is automatically copied to:
 
