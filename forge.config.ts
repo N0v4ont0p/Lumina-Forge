@@ -10,6 +10,8 @@ const nativeModules = ['sharp', '@img', 'exiftool-vendored'];
 
 const config: ForgeConfig = {
   packagerConfig: {
+    icon: './logo',
+    extraResource: ['./logo.icns'],
     asar: {
       // Belt-and-suspenders alongside AutoUnpackNativesPlugin: ensure sharp
       // and its platform-specific binaries are extracted from the asar so
