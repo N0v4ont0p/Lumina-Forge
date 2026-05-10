@@ -262,5 +262,7 @@ function App() {
 }
 
 const rootEl = document.getElementById('root');
-if (!rootEl) throw new Error('Missing root element');
+if (!rootEl) {
+  throw new Error('Failed to find root DOM element with id "root". Ensure index.html contains <div id="root"></div>.');
+}
 createRoot(rootEl).render(<App />);

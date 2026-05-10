@@ -155,5 +155,5 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
-  exiftool.end();
+  void exiftool.end();
 });

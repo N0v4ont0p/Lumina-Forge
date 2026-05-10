@@ -2,7 +2,7 @@
 
 # ✨ Lumina Forge (Electron Premium)
 
-### _Mac-only Liquid Glass metadata editor — no Xcode required_
+### _Currently macOS-only by design: Liquid Glass metadata editor — no Xcode required_
 
 </div>
 
