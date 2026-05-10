@@ -65,25 +65,48 @@ Lumina Forge is crafted from the ground up for **macOS 26 Tahoe**, embracing App
 - macOS 26 Tahoe or later
 - Xcode 17 or later
 - Swift 6
+- **No Apple Developer account required** — the project builds unsigned (arm64)
 
-### Clone & Build
+### One-Command Build
 
 ```bash
 git clone https://github.com/N0v4ont0p/lumina-forge.git
 cd lumina-forge
-open "Lumina Forge.xcodeproj"
+bash build.sh
 ```
 
-### Development Commands
+After the build completes, **Lumina Forge.app is automatically copied to `~/Downloads/Lumina Forge/`** and is ready to run — no manual steps needed.
+
+```bash
+# Open the app immediately after building:
+open ~/Downloads/Lumina\ Forge/Lumina\ Forge.app
+```
+
+### Build Options
 
 | Command | Description |
 |---|---|
-| `open "Lumina Forge.xcodeproj"` | Open project in Xcode |
-| `⌘R` in Xcode | Build & Run |
-| `⌘U` in Xcode | Run Tests |
-| `⌘⇧K` in Xcode | Clean Build Folder |
-| `swift build` | CLI Build (Package.swift required) |
-| `swift test` | CLI Tests |
+| `bash build.sh` | Debug build → `~/Downloads/Lumina Forge/` |
+| `bash build.sh release` | Optimised Release build → same destination |
+| `bash build.sh clean` | Clean the build folder |
+| `bash build.sh clean release` | Clean + Release build |
+
+### Open in Xcode (optional)
+
+```bash
+open "Lumina Forge.xcodeproj"
+```
+
+Press **⌘R** to build and run; the built `.app` is automatically copied to `~/Downloads/Lumina Forge/` by the **Copy to Downloads** Run Script build phase.
+
+### Build Settings
+
+| Setting | Value | Effect |
+|---|---|---|
+| `ARCHS` | `arm64` | Apple Silicon only — smallest, fastest binary |
+| `CODE_SIGNING_REQUIRED` | `NO` | No certificate or developer account needed |
+| `CODE_SIGN_IDENTITY` | `-` | Ad-hoc / unsigned |
+| `ENABLE_USER_SCRIPT_SANDBOXING` | `NO` | Allows the post-build copy to `~/Downloads` |
 
 ---
 
