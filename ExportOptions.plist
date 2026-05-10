@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ExifTool -->
+    <key>UseExifTool</key>
+    <true/>
+
+    <!-- Output Formats -->
+    <key>DefaultOutputFormat</key>
+    <string>JSON</string>
+
+    <key>AvailableOutputFormats</key>
+    <array>
+        <string>JSON</string>
+        <string>CSV</string>
+        <string>XMP Sidecar</string>
+    </array>
+
+    <!-- File Handling -->
+    <key>OverwriteOriginal</key>
+    <false/>
+
+    <key>CreateSidecarXMP</key>
+    <true/>
+
+    <!-- Export Destination -->
+    <key>DefaultExportDirectory</key>
+    <string>~/Desktop/LuminaForgeExports</string>
+
+    <!-- Metadata Fields to Include -->
+    <key>IncludedFields</key>
+    <array>
+        <string>FileName</string>
+        <string>FileSize</string>
+        <string>ImageWidth</string>
+        <string>ImageHeight</string>
+        <string>Make</string>
+        <string>Model</string>
+        <string>LensModel</string>
+        <string>ISO</string>
+        <string>FNumber</string>
+        <string>ExposureTime</string>
+        <string>FocalLength</string>
+        <string>DateTimeOriginal</string>
+        <string>GPSLatitude</string>
+        <string>GPSLongitude</string>
+        <string>Title</string>
+        <string>Description</string>
+        <string>Copyright</string>
+        <string>Creator</string>
+        <string>Keywords</string>
+        <string>Rating</string>
+    </array>
+
+    <!-- Batch Settings -->
+    <key>BatchConcurrencyLimit</key>
+    <integer>8</integer>
+
+    <key>BatchShowProgress</key>
+    <true/>
+</dict>
+</plist>
