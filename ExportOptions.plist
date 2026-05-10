@@ -2,7 +2,40 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- ExifTool -->
+    <!-- ── Xcode Export Archive options (used by scripts/build-dmg.sh) ──── -->
+
+    <!-- Export method for a notarized Developer-ID build outside the Mac App Store -->
+    <key>method</key>
+    <string>developer-id</string>
+
+    <!-- Sign the exported app with a Developer ID Application certificate -->
+    <key>signingStyle</key>
+    <string>automatic</string>
+
+    <!-- Embed the provisioning profile if your account has one configured -->
+    <key>provisioningProfiles</key>
+    <dict/>
+
+    <!-- Hardened Runtime is required for notarization -->
+    <key>hardCodedEntitlements</key>
+    <dict>
+        <key>com.apple.security.app-sandbox</key>
+        <true/>
+        <key>com.apple.security.files.all</key>
+        <true/>
+        <key>com.apple.security.files.downloads.read-write</key>
+        <true/>
+        <key>com.apple.security.files.user-selected.read-write</key>
+        <true/>
+    </dict>
+
+    <!-- Strip Swift symbols from the exported binary to reduce DMG size -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+
+    <!-- ── Lumina Forge Metadata Export options ───────────────────────────── -->
+
+    <!-- ExifTool integration -->
     <key>UseExifTool</key>
     <true/>
 
@@ -22,6 +55,10 @@
     <false/>
 
     <key>CreateSidecarXMP</key>
+    <true/>
+
+    <!-- Safety: temp backup is written before overwrite (see MetadataActor.writeMetadata) -->
+    <key>SafetyBackupEnabled</key>
     <true/>
 
     <!-- Export Destination -->

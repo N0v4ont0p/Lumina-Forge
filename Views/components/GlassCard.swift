@@ -19,6 +19,9 @@ struct GlassCard: View {
     /// Fixed card height.  Grid mode uses 160 px; masonry mode passes a value
     /// derived from the image's aspect ratio.
     var cardHeight: CGFloat = 160
+    /// `true` for assets discovered via FSEvents folder watching (shows a brief
+    /// pulsing green border to draw the user's attention to the new arrival).
+    var isNewlyAdded: Bool = false
     let action: () -> Void
 
     @Environment(ThumbnailActor.self) private var thumbnailActor
@@ -27,6 +30,7 @@ struct GlassCard: View {
     @State private var isHovered = false
     @State private var rippleRadius: CGFloat = 0
     @State private var rippleOpacity: Double = 0
+    @State private var newlyAddedPulse = false
 
     // Unified spring per master plan
     private let spring = Animation.spring(response: 0.28, dampingFraction: 0.82)
@@ -61,6 +65,8 @@ struct GlassCard: View {
         )
         // Gradient bloom ring rendered on top of the glass surface
         .overlay(selectionBloom)
+        // FSEvents "newly added" pulse ring
+        .overlay(newlyAddedRing)
         .glassEffect(in: RoundedRectangle(cornerRadius: 14))
         .animation(spring, value: isHovered)
         .animation(spring, value: isSelected)
@@ -69,6 +75,13 @@ struct GlassCard: View {
         .task(id: asset.id) {
             guard !asset.isThumbnailLoaded else { return }
             _ = await thumbnailActor.thumbnail(for: asset.url, asset: asset)
+        }
+        // Pulse the green ring when newly added
+        .onAppear {
+            guard isNewlyAdded else { return }
+            withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+                newlyAddedPulse = true
+            }
         }
     }
 
@@ -95,6 +108,22 @@ struct GlassCard: View {
                 // Inner glow drawn behind the stroke via a shadow
                 .shadow(color: .accentColor.opacity(0.65), radius: 7)
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        }
+    }
+
+    // MARK: - Newly Added Ring
+
+    /// Pulsing green ring shown briefly for assets discovered via FSEvents.
+    @ViewBuilder
+    private var newlyAddedRing: some View {
+        if isNewlyAdded {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(
+                    Color.green.opacity(newlyAddedPulse ? 0.9 : 0.25),
+                    lineWidth: 2.5
+                )
+                .shadow(color: .green.opacity(0.5), radius: newlyAddedPulse ? 8 : 2)
+                .transition(.opacity)
         }
     }
 

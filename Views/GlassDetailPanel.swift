@@ -4,24 +4,29 @@ import SwiftUI
 
 struct GlassDetailPanel: View {
     let asset: ImageAsset?
-    /// Namespace shared with `GlassGridView` / `GlassCard` so hero thumbnail
-    /// transitions can be activated when the navigation architecture collapses
-    /// to a single column (the matched-geometry IDs are already wired on the
-    /// card side; the detail panel holds the `isSource: false` anchor).
+    /// Namespace shared with `GlassGridView` / `GlassCard` for hero thumbnail transitions.
     var heroNamespace: Namespace.ID
 
     @Environment(MetadataActor.self) private var metadataActor
-    @State private var isEditing = false
+
+    // MARK: Edit mode state
+    @State private var isEditing       = false
+    @State private var editedMetadata  = MetadataModel()
+
+    // MARK: Alerts
+    @State private var showStripAlert  = false
+    @State private var showErrorAlert  = false
+    @State private var errorMessage    = ""
 
     // Unified spring per master plan
     private let spring = Animation.spring(response: 0.28, dampingFraction: 0.82)
+
+    // MARK: - Body
 
     var body: some View {
         Group {
             if let asset {
                 detailContent(for: asset)
-                    // Assign a stable ID so SwiftUI re-runs the transition
-                    // every time a different asset is selected.
                     .id(asset.id)
                     .transition(
                         .asymmetric(
@@ -30,12 +35,44 @@ struct GlassDetailPanel: View {
                             removal: .opacity.animation(.easeOut(duration: 0.14))
                         )
                     )
+                    // Keyboard shortcut: ⌘Z to undo last metadata write
+                    .background(
+                        Button("") {
+                            Task { try? await metadataActor.undo(for: asset) }
+                        }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .hidden()
+                    )
             } else {
                 placeholderView
             }
         }
         .animation(spring, value: asset?.id)
         .glassBackgroundEffect()
+        // Strip-metadata confirmation
+        .alert("Strip All Metadata?", isPresented: $showStripAlert) {
+            Button("Strip", role: .destructive) {
+                guard let a = asset else { return }
+                Task {
+                    do    { try await metadataActor.stripAllMetadata(from: a) }
+                    catch {
+                        errorMessage  = error.localizedDescription
+                        showErrorAlert = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes all EXIF, IPTC, and XMP data from the file on disk. " +
+                 "An in-session undo entry will be pushed, but the original data cannot be recovered " +
+                 "after the app quits.")
+        }
+        // Write-error alert
+        .alert("Metadata Write Failed", isPresented: $showErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
     }
 
     // MARK: - Detail Content
@@ -46,13 +83,50 @@ struct GlassDetailPanel: View {
             VStack(alignment: .leading, spacing: 20) {
                 thumbnailHeader(for: asset)
                 metadataSection(for: asset)
-                exifSection(for: asset)
-                iptcSection(for: asset)
-                actionButtons(for: asset)
+                if isEditing {
+                    editIPTCSection(for: asset)
+                } else {
+                    exifSection(for: asset)
+                    iptcSection(for: asset)
+                    actionButtons(for: asset)
+                }
             }
             .padding(20)
         }
         .navigationTitle(asset.fileName)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                // Undo button (⌘Z also bound below)
+                Button {
+                    Task { try? await metadataActor.undo(for: asset) }
+                } label: {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                }
+                .help("Undo last metadata write (⌘Z)")
+                .keyboardShortcut("z", modifiers: .command)
+
+                // Edit / Done toggle
+                Button(isEditing ? "Done" : "Edit") {
+                    if isEditing {
+                        // Commit edits
+                        let snapshot = editedMetadata
+                        Task {
+                            do    { try await metadataActor.writeMetadata(snapshot, to: asset) }
+                            catch {
+                                errorMessage   = error.localizedDescription
+                                showErrorAlert = true
+                            }
+                        }
+                    } else {
+                        // Snapshot current metadata for editing
+                        editedMetadata = asset.metadata ?? MetadataModel()
+                    }
+                    withAnimation(spring) { isEditing.toggle() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(isEditing ? .green : .accentColor)
+            }
+        }
     }
 
     // MARK: - Thumbnail Header
@@ -67,9 +141,6 @@ struct GlassDetailPanel: View {
                     .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .padding(8)
-                    // Hero transition destination anchor.
-                    // `isSource: false` means this view adopts the frame of
-                    // the matching card thumbnail when a navigation transition fires.
                     .matchedGeometryEffect(
                         id: "thumb_\(asset.id)",
                         in: heroNamespace,
@@ -85,14 +156,14 @@ struct GlassDetailPanel: View {
         .glassEffect(in: RoundedRectangle(cornerRadius: 16))
     }
 
-    // MARK: - Metadata Section
+    // MARK: - Metadata Section (File Info)
 
     private func metadataSection(for asset: ImageAsset) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("File Info")
-            metadataRow("File Name", value: asset.fileName)
-            metadataRow("File Size", value: asset.formattedFileSize)
-            metadataRow("Dimensions", value: asset.formattedDimensions)
+            metadataRow("File Name",     value: asset.fileName)
+            metadataRow("File Size",     value: asset.formattedFileSize)
+            metadataRow("Dimensions",    value: asset.formattedDimensions)
             metadataRow("Date Modified", value: asset.formattedDate)
         }
     }
@@ -123,21 +194,21 @@ struct GlassDetailPanel: View {
         }
     }
 
-    // MARK: - IPTC Section
+    // MARK: - IPTC Section (read-only view)
 
     private func iptcSection(for asset: ImageAsset) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("IPTC / XMP")
             if let m = asset.metadata {
-                metadataRow("Title",       value: m.title ?? "—")
-                metadataRow("Headline",    value: m.headline ?? "—")
-                metadataRow("Caption",     value: m.caption ?? m.imageDescription ?? "—")
-                metadataRow("Copyright",   value: m.copyright ?? "—")
-                metadataRow("Creator",     value: m.creator ?? "—")
-                metadataRow("Credit",      value: m.credit ?? "—")
-                metadataRow("Source",      value: m.source ?? "—")
-                metadataRow("Keywords",    value: m.keywords?.joined(separator: ", ") ?? "—")
-                metadataRow("Rating",      value: m.rating.map { "\($0) ★" } ?? "—")
+                metadataRow("Title",     value: m.title ?? "—")
+                metadataRow("Headline",  value: m.headline ?? "—")
+                metadataRow("Caption",   value: m.caption ?? m.imageDescription ?? "—")
+                metadataRow("Copyright", value: m.copyright ?? "—")
+                metadataRow("Creator",   value: m.creator ?? "—")
+                metadataRow("Credit",    value: m.credit ?? "—")
+                metadataRow("Source",    value: m.source ?? "—")
+                metadataRow("Keywords",  value: m.keywords?.joined(separator: ", ") ?? "—")
+                metadataRow("Rating",    value: m.rating.map { "\($0) ★" } ?? "—")
                 if let city = m.city { metadataRow("City", value: city) }
                 if let country = m.country { metadataRow("Country", value: country) }
             } else {
@@ -148,26 +219,110 @@ struct GlassDetailPanel: View {
         }
     }
 
-    // MARK: - Action Buttons
+    // MARK: - Edit IPTC Section
+
+    @ViewBuilder
+    private func editIPTCSection(for asset: ImageAsset) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sectionHeader("Edit IPTC / XMP")
+
+            editField("Title",     text: Binding(
+                get: { editedMetadata.title ?? "" },
+                set: { editedMetadata.title = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Caption", text: Binding(
+                get: { editedMetadata.caption ?? "" },
+                set: { editedMetadata.caption = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Copyright", text: Binding(
+                get: { editedMetadata.copyright ?? "" },
+                set: { editedMetadata.copyright = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Creator", text: Binding(
+                get: { editedMetadata.creator ?? "" },
+                set: { editedMetadata.creator = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Credit", text: Binding(
+                get: { editedMetadata.credit ?? "" },
+                set: { editedMetadata.credit = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Keywords (comma-separated)", text: Binding(
+                get: { editedMetadata.keywords?.joined(separator: ", ") ?? "" },
+                set: {
+                    let kws = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                    editedMetadata.keywords = kws.isEmpty ? nil : kws
+                }
+            ))
+            editField("City", text: Binding(
+                get: { editedMetadata.city ?? "" },
+                set: { editedMetadata.city = $0.isEmpty ? nil : $0 }
+            ))
+            editField("Country", text: Binding(
+                get: { editedMetadata.country ?? "" },
+                set: { editedMetadata.country = $0.isEmpty ? nil : $0 }
+            ))
+
+            // Rating stepper
+            HStack {
+                Text("Rating")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 110, alignment: .leading)
+                Stepper("\(editedMetadata.rating ?? 0) ★", value: Binding(
+                    get: { editedMetadata.rating ?? 0 },
+                    set: { editedMetadata.rating = $0 == 0 ? nil : $0 }
+                ), in: 0...5)
+            }
+
+            // Destructive strip button at the bottom of edit mode
+            Divider()
+
+            Button(role: .destructive) {
+                isEditing = false
+                showStripAlert = true
+            } label: {
+                Label("Strip All Metadata…", systemImage: "trash")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.glass)
+            .foregroundStyle(.red)
+        }
+        .transition(.opacity.combined(with: .offset(y: 8)))
+    }
+
+    // MARK: - Action Buttons (read-only mode)
 
     private func actionButtons(for asset: ImageAsset) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                Task { await metadataActor.toggleFavorite(asset) }
-            } label: {
-                Label(
-                    asset.isFavorite ? "Remove Favorite" : "Add Favorite",
-                    systemImage: asset.isFavorite ? "star.fill" : "star"
-                )
-            }
-            .buttonStyle(.glass)
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Button {
+                    Task { await metadataActor.toggleFavorite(asset) }
+                } label: {
+                    Label(
+                        asset.isFavorite ? "Remove Favorite" : "Add Favorite",
+                        systemImage: asset.isFavorite ? "star.fill" : "star"
+                    )
+                }
+                .buttonStyle(.glass)
 
-            Button {
-                Task { await metadataActor.addToExportQueue(asset) }
+                Button {
+                    Task { await metadataActor.addToExportQueue(asset) }
+                } label: {
+                    Label("Export", systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.glass)
+            }
+
+            // Strip button in read-only mode too (less prominent)
+            Button(role: .destructive) {
+                showStripAlert = true
             } label: {
-                Label("Export", systemImage: "arrow.up.circle")
+                Label("Strip All Metadata…", systemImage: "trash")
+                    .font(.callout)
             }
             .buttonStyle(.glass)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -194,6 +349,17 @@ struct GlassDetailPanel: View {
         }
     }
 
+    private func editField(_ label: String, text: Binding<String>) -> some View {
+        HStack {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: 110, alignment: .leading)
+            TextField(label, text: text)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
     // MARK: - Placeholder
 
     private var placeholderView: some View {
@@ -201,6 +367,7 @@ struct GlassDetailPanel: View {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 48))
                 .foregroundStyle(.tertiary)
+                .symbolEffect(.pulse)
             Text("Select an Image")
                 .font(.title2.bold())
                 .foregroundStyle(.secondary)

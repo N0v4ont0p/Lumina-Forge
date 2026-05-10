@@ -48,6 +48,32 @@ actor MetadataActor {
 
     var assetCount: Int { assets.count }
 
+    // MARK: - Batch Operation Progress
+
+    /// Total assets in the current batch operation.
+    private(set) var batchTotal: Int = 0
+
+    /// Number of assets completed in the current batch operation.
+    private(set) var batchCompleted: Int = 0
+
+    /// Filename currently being processed during a batch operation.
+    private(set) var currentProcessingFile: String = ""
+
+    /// `true` while a batch export / write operation is active.
+    private(set) var isBatchRunning: Bool = false
+
+    /// Set to `true` to request cancellation of the current batch operation.
+    private var isBatchCancelled: Bool = false
+
+    /// Most-recent operation error, displayed in the UI as an alert.
+    private(set) var lastError: String? = nil
+
+    // MARK: - Recently Added (FSEvents)
+
+    /// Asset IDs whose files were discovered via FSEvents folder-watching.
+    /// Cleared 5 s after being populated so the highlight pulse fades out.
+    private(set) var recentlyAddedAssetIDs: Set<UUID> = []
+
     // MARK: - Undo Stack
     // Maps asset.id → ring buffer of MetadataEdit records.
 
@@ -145,6 +171,44 @@ actor MetadataActor {
                 completed  += batchSize
                 loadProgress = min(Double(completed) / total, 1.0)
             }
+        }
+    }
+
+    // MARK: ─── FOLDER-WATCH LOAD ─────────────────────────────────────────────
+
+    /// Load assets discovered by `FolderWatcherActor` (FSEvents-triggered).
+    ///
+    /// Identical to `loadAssets(from:)` but marks newly created `ImageAsset`
+    /// objects as recently-added so the grid card can display a highlight pulse.
+    /// The recently-added marking is cleared automatically after 5 seconds.
+    func loadAssetsWatched(from urls: [URL]) async {
+        let fileURLs = expandToImageFiles(urls)
+        let newURLs  = fileURLs.filter { url in !assets.contains { $0.url == url } }
+        guard !newURLs.isEmpty else { return }
+
+        let newAssets: [ImageAsset] = newURLs.map { url in
+            let asset = ImageAsset(url: url)
+            asset.cachedFileSize = ImageAsset.diskFileSize(for: url)
+            return asset
+        }
+        assets.append(contentsOf: newAssets)
+
+        // Mark as recently added for highlight pulse.
+        let newIDs = Set(newAssets.map(\.id))
+        recentlyAddedAssetIDs.formUnion(newIDs)
+
+        // Fast ImageIO pass.
+        for asset in newAssets {
+            if let quick = Self.readQuickMetadata(from: asset.url) {
+                asset.metadata         = quick
+                asset.isMetadataLoaded = true
+            }
+        }
+
+        // Clear the highlight after 5 seconds.
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            recentlyAddedAssetIDs.subtract(newIDs)
         }
     }
 
@@ -262,12 +326,25 @@ actor MetadataActor {
     /// are written with correct hemisphere reference tags.  Keywords replace
     /// the existing set (clear-then-add).
     ///
+    /// **Safety:** before writing, a temp backup of the original file is created
+    /// in the system temp directory.  If ExifTool fails, the backup is restored
+    /// so the original file is never left in a corrupt state.  On success the
+    /// backup is deleted.
+    ///
     /// Before writing, the current metadata is saved to the undo stack.
     /// After writing succeeds, the in-memory model is updated.
     ///
     /// - Throws: `MetadataError.exifToolNotFound` / `MetadataError.writeFailed`.
     func writeMetadata(_ metadata: MetadataModel, to asset: ImageAsset) async throws {
         guard let tool = exifToolURL else { throw MetadataError.exifToolNotFound }
+
+        // ── Safety backup ────────────────────────────────────────────────────
+        let backupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "LuminaBackup_\(asset.id.uuidString)_\(asset.url.lastPathComponent)"
+            )
+        try? FileManager.default.removeItem(at: backupURL)          // clean stale backup
+        try? FileManager.default.copyItem(at: asset.url, to: backupURL)
 
         // Push undo before modifying anything.
         pushUndo(assetID: asset.id, before: asset.metadata, after: metadata)
@@ -331,8 +408,17 @@ actor MetadataActor {
         args.append(asset.url.path(percentEncoded: false))
 
         guard let _ = await runExifToolProcess(tool: tool, arguments: args, expectOutput: false) else {
+            // ── Restore from backup if write failed ──────────────────────────
+            if FileManager.default.fileExists(atPath: backupURL.path(percentEncoded: false)) {
+                try? FileManager.default.removeItem(at: asset.url)
+                try? FileManager.default.copyItem(at: backupURL, to: asset.url)
+            }
+            try? FileManager.default.removeItem(at: backupURL)
             throw MetadataError.writeFailed(asset.url)
         }
+
+        // ── Remove backup on success ─────────────────────────────────────────
+        try? FileManager.default.removeItem(at: backupURL)
 
         // Update in-memory model and clear the dirty flag.
         var saved = metadata
@@ -391,18 +477,44 @@ actor MetadataActor {
     // MARK: ─── BATCH HELPERS ─────────────────────────────────────────────────
 
     /// Export metadata for all assets in the export queue, writing JSON files
-    /// alongside each image.
+    /// alongside each image.  Updates `batchCompleted`, `batchTotal`, and
+    /// `currentProcessingFile` so `BatchProgressView` can observe live progress.
     func batchExportJSON(to directory: URL) async throws {
         let queue = assets.filter(\.isInExportQueue)
+        guard !queue.isEmpty else { return }
+
+        batchTotal     = queue.count
+        batchCompleted = 0
+        isBatchRunning = true
+        isBatchCancelled = false
+        defer {
+            isBatchRunning        = false
+            currentProcessingFile = ""
+        }
+
         for asset in queue {
-            guard let meta = asset.metadata else { continue }
+            if isBatchCancelled { break }
+
+            currentProcessingFile = asset.fileName
+
+            guard let meta = asset.metadata else {
+                batchCompleted += 1
+                continue
+            }
             let dict   = meta.asDictionary()
             let data   = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)
             let outURL = directory
                 .appendingPathComponent(asset.url.deletingPathExtension().lastPathComponent)
                 .appendingPathExtension("json")
             try data.write(to: outURL)
+
+            batchCompleted += 1
         }
+    }
+
+    /// Request cancellation of the currently-running batch operation.
+    func cancelBatch() {
+        isBatchCancelled = true
     }
 
     // MARK: ─── UNDO / REDO ───────────────────────────────────────────────────

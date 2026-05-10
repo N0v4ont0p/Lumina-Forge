@@ -91,7 +91,8 @@ struct GlassGridView: View {
                                 asset: asset,
                                 isSelected: selectedAsset?.id == asset.id,
                                 namespace: heroNamespace,
-                                cardHeight: isMasonry ? masonryHeight(for: asset) : 160
+                                cardHeight: isMasonry ? masonryHeight(for: asset) : 160,
+                                isNewlyAdded: metadataActor.recentlyAddedAssetIDs.contains(asset.id)
                             ) {
                                 withAnimation(spring) { selectedAsset = asset }
                             }
@@ -136,6 +137,11 @@ struct GlassGridView: View {
         // Re-stagger when the active collection or sort order changes
         .onChange(of: sidebarItem) { _, _ in resetStagger() }
         .onChange(of: sortOrder)   { _, _ in resetStagger() }
+        // Batch-export progress sheet (observes metadataActor directly)
+        .sheet(isPresented: $showBatchProgress) {
+            BatchProgressView(isPresented: $showBatchProgress)
+                .environment(metadataActor)
+        }
     }
 
     // MARK: - Filtered & Sorted Assets
@@ -350,7 +356,26 @@ struct GlassGridView: View {
     // MARK: - Actions
 
     private func startBatchExport() {
-        showBatchProgress = true
+        let queued = filteredAssets.filter(\.isInExportQueue)
+        guard !queued.isEmpty else {
+            // Nothing in the queue yet — add all visible assets then export.
+            Task { await metadataActor.batchAddToExportQueue(filteredAssets) }
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories  = true
+        panel.canChooseFiles        = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder to save exported metadata"
+        panel.prompt  = "Export Here"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            showBatchProgress = true
+            Task {
+                do    { try await metadataActor.batchExportJSON(to: url) }
+                catch { /* errors surfaced via metadataActor.lastError */ }
+            }
+        }
     }
 
     private func openImagePanel() {
