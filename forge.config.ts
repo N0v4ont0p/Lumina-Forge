@@ -12,6 +12,9 @@ const config: ForgeConfig = {
   packagerConfig: {
     icon: './logo.icns',
     extraResource: ['./logo.icns'],
+    // Required by AutoUnpackNativesPlugin – the app must be packaged as an
+    // asar archive so the plugin can unpack native binaries from it.
+    asar: true,
     // Extract native modules from the asar archive so that .node binaries
     // (sharp, exiftool-vendored's exiftool binary, and batch-cluster) can
     // be loaded at runtime on macOS arm64.  Belt-and-suspenders alongside
