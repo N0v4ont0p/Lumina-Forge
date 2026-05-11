@@ -7,7 +7,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   build: {
     rollupOptions: {
-      external: ['sharp', 'exiftool-vendored'],
+      external: ['sharp', 'exiftool-vendored', 'luxon'],
     },
     commonjsOptions: {
       // Help rollup-plugin-commonjs resolve sharp's dynamic require of its

@@ -3,11 +3,6 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 
-// Native modules that must NOT be bundled by Vite and must be present
-// at runtime as real files inside the packaged app's node_modules so that
-// sharp can dynamically load its `darwin-arm64` binary on Apple Silicon.
-const nativeModules = ['sharp', '@img', 'exiftool-vendored', '@photostructure', 'batch-cluster'];
-
 const config: ForgeConfig = {
   packagerConfig: {
     icon: './logo.icns',
@@ -29,17 +24,16 @@ const config: ForgeConfig = {
     appCategoryType: 'public.app-category.photography',
     osxSign: false,
     // Override the default ignore filter from @electron-forge/plugin-vite,
-    // which strips everything except `.vite/`. We additionally allow the
-    // native node_modules required at runtime through to the package.
+    // which strips everything except `.vite/`. We allow the entire
+    // node_modules tree through so that runtime deps of whitelisted native
+    // modules (e.g. luxon, which is required by exiftool-vendored) are never
+    // accidentally stripped. Vite already bundles all renderer/preload code
+    // into .vite/, so passing node_modules through does not bloat bundles.
     ignore: (file: string) => {
       if (!file) return false;
       if (file.startsWith('/.vite')) return false;
       if (file === '/package.json') return false;
-      if (file === '/node_modules') return false;
-      for (const mod of nativeModules) {
-        if (file.startsWith(`/node_modules/${mod}/`)) return false;
-        if (file.startsWith(`/node_modules/${mod}`)) return false;
-      }
+      if (file.startsWith('/node_modules')) return false;
       return true;
     },
   },
