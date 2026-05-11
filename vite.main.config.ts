@@ -9,14 +9,5 @@ export default defineConfig({
     rollupOptions: {
       external: ['sharp', 'exiftool-vendored', 'luxon'],
     },
-    commonjsOptions: {
-      // Help rollup-plugin-commonjs resolve sharp's dynamic require of its
-      // platform binary loader on macOS arm64.
-      dynamicRequireTargets: [
-        'node_modules/sharp/lib/sharp.js',
-        'node_modules/@img/sharp-darwin-arm64/**/*',
-        'node_modules/@img/sharp-libvips-darwin-arm64/**/*',
-      ],
-    },
   },
 });
