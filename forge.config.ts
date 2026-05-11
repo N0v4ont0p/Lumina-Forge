@@ -6,7 +6,7 @@ import { VitePlugin } from '@electron-forge/plugin-vite';
 // Native modules that must NOT be bundled by Vite and must be present
 // at runtime as real files inside the packaged app's node_modules so that
 // sharp can dynamically load its `darwin-arm64` binary on Apple Silicon.
-const nativeModules = ['sharp', '@img', 'exiftool-vendored', 'batch-cluster'];
+const nativeModules = ['sharp', '@img', 'exiftool-vendored', '@photostructure', 'batch-cluster'];
 
 const config: ForgeConfig = {
   packagerConfig: {
