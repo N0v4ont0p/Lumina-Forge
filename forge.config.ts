@@ -7,19 +7,21 @@ const config: ForgeConfig = {
   packagerConfig: {
     icon: './logo.icns',
     extraResource: ['./logo.icns'],
-    // Required by AutoUnpackNativesPlugin – the app must be packaged as an
-    // asar archive so the plugin can unpack native binaries from it.
-    asar: true,
-    // Extract native modules from the asar archive so that .node binaries
-    // (sharp, exiftool-vendored's exiftool binary, and batch-cluster) can
-    // be loaded at runtime on macOS arm64.  Belt-and-suspenders alongside
-    // AutoUnpackNativesPlugin below.
-    asarUnpack: [
-      '**/node_modules/exiftool-vendored/**',
-      '**/node_modules/batch-cluster/**',
-      '**/node_modules/sharp/**',
-      '**/node_modules/@img/**',
-    ],
+    // AutoUnpackNativesPlugin converts `asar: true` → `asar: {}` and writes
+    // its auto-detected .node pattern into `asar.unpack`.  When `asar` is
+    // already an object the plugin *merges* instead of replaces, so our
+    // custom patterns are preserved.  Using `packagerConfig.asarUnpack`
+    // alone is NOT sufficient because the packager ignores it once `asar`
+    // becomes an object.
+    asar: {
+      // Extract native modules from the asar archive so that .node binaries
+      // (sharp, exiftool-vendored's exiftool binary, and batch-cluster) and
+      // their companion shared libraries (.dylib) – e.g. the libvips dylibs
+      // inside @img/sharp-libvips-darwin-arm64 – can be loaded at runtime
+      // on macOS arm64.  AutoUnpackNativesPlugin appends its own
+      // **/{.**,**}/**/*.node pattern to this value.
+      unpack: '{**/node_modules/exiftool-vendored/**,**/node_modules/batch-cluster/**,**/node_modules/sharp/**,**/node_modules/@img/**}',
+    },
     appBundleId: 'com.luminaforge.app',
     appCategoryType: 'public.app-category.photography',
     osxSign: false,
